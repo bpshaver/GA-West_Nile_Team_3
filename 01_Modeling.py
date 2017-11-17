@@ -4,31 +4,57 @@ Created on Tue Nov 14 20:34:11 2017
 
 @author: benps
 """
-import datetime
+
+# Importing necessary packages
+print('Importing packages...')
+
 import pandas as pd
 import numpy as np
-#%%
-train = pd.read_csv('Final_train.csv', encoding='utf-8', index_col='Trap')
-# test = pd.read_csv('Final_test.csv', encoding='utf-8', index_col='Trap')
-
-print([x for x in test.columns if x not in train.columns])
-print([x for x in train.columns if x not in test.columns])
-
-#%%
-from sklearn.model_selection import train_test_split
-
-model_data = train.select_dtypes(include=[np.number])
-X_train, X_test, y_train, y_test = train_test_split(model_data.drop('WnvPresent', axis=1), model_data['WnvPresent'])
-
-
-#%%
 
 from keras.models import Sequential
 from keras.layers.core import Dense, Dropout, Activation
 from keras.utils import np_utils
 from sklearn import metrics
-from sklearn.model_selection import train_test_split
 
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+#%%
+print('Importing data...')
+
+train = pd.read_csv('Final_train.csv', encoding='utf-8', index_col='Trap')
+test = pd.read_csv('Final_test.csv', encoding='utf-8', index_col='Trap')
+
+print('Columns in test set not contain in training set:')
+print([x for x in test.columns if x not in train.columns])
+print('Columns in training set not contained in test set:')
+print([x for x in train.columns if x not in test.columns])
+
+input('Press a key to continue...')
+
+
+#%%
+
+# Create dummy variables for Species and Zone Type
+train = pd.get_dummies(train, columns=['Species','Zone Type'])
+# Manually insert dummy column into training set for species value that does not
+#  appear in the training set, but does occur in the test set.
+train.insert(26,'Species_UNSPECIFIED CULEX', 0)
+# We can't make predictions based on the number of mosquitos in each trap, since 
+#  that info is not contained in the test set.
+train.drop(['Date','NumMosquitos'], axis =1, inplace=True)
+
+# Select all numeric columns
+train = train.select_dtypes(include=[np.number])
+
+# Same as above, but for test set.
+test = pd.get_dummies(test, columns=['Species','Zone Type'])
+test = test.select_dtypes(include=[np.number])
+
+
+#%%
+# Build a certain model architecture based on a number of input dimensions and 
+#  output dimensions
+print('Building neural network model...')
 def build_model(input_dim, output_dim):
     model = Sequential()
     model.add(Dense(32, input_dim=input_dim))
@@ -49,79 +75,58 @@ def build_model(input_dim, output_dim):
     model.compile(loss='categorical_crossentropy', optimizer="adam", metrics=['accuracy'])
     return model
 
-from sklearn.preprocessing import StandardScaler
-
+# Instanntiate scaler
 scaler = StandardScaler()
-y = model_data['WnvPresent']
-X = model_data.drop(['NumMosquitos','WnvPresent'], axis = 1)
 
+# Define independent and dependent variables
+y = train['WnvPresent']
+X = train.drop(['WnvPresent'], axis = 1)
+
+# When we included spray data, we wanted to drop it out and test model performance
+# It made no difference.
 # X = X.drop(['Sprayed_lastweek_close','Sprayed_lastweek_far', 'Sprayed_last2weeks_close',
 #        'Sprayed_last2weeks_far'], axis = 1)
-# Keep or drop spray data?
 
+# Scale independent variables.
 X = scaler.fit_transform(X)
+# Encode dependent variable as needed
 y = np_utils.to_categorical(y)
 
-
+# Create training and test sets
 X_train, X_test, y_train, y_test = train_test_split(X, y)
 
+# Save our training set as an array
 X_train = np.array(X_train)
 y_train = np.array(y_train)
 
+model = build_model(X_train.shape[1], y_train.shape[1])
 
-model = build_model(X_train.shape[1], 2)
+input('Press any key to fit model...')
 
-model.fit(X_train, y_train, epochs=10, batch_size=16, verbose=1)
-
+# Fitting the model with class weights to balance classes
+model.fit(X_train, y_train, epochs=20, batch_size=16, verbose=1, class_weight= {0:1, 1:18})
 #%%
+# Evaluate model performacne:
+print('Model AUC: ')
 print(metrics.roc_auc_score(y_test, model.predict(X_test)))
+#%%
+# Scale test set and save as array
+test_array = scaler.transform(test)
+test_array = np.array(test_array)
 
 #%%
-from tpot import TPOTClassifier
-
-
-
-pipeline_optimizer = TPOTClassifier(max_time_mins=60, population_size=20, cv=5,
-                                    random_state=42, verbosity=2, scoring='roc_auc')
-
-pipeline_optimizer.fit(X_train, y_train)
-#%%
-print(pipeline_optimizer.score(X_test, y_test))
-#%%
-pipeline_optimizer.export('tpot_exported_pipeline.py')
+# Predict probabilities
+predictions = model.predict_proba(test_array)
+predictions = pd.DataFrame(predictions)
 
 #%%
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.feature_selection import RFE
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import make_pipeline, make_union
-from tpot.builtins import StackingEstimator
+# Re-join the identifying variables to the predictions:
+traps = pd.read_csv('Final_test.csv', encoding='utf-8')[['Trap','Week','Species']]
+predictions = predictions.join(traps)
+
 #%%
+#save = input("Save predictions to CSV? y/n ")
 
-# NOTE: Make sure that the class is labeled 'target' in the data file
-tpot_data = pd.read_csv('PATH/TO/DATA/FILE', sep='COLUMN_SEPARATOR', dtype=np.float64)
-features = tpot_data.drop('target', axis=1).values
-training_features, testing_features, training_target, testing_target = \
-            train_test_split(features, tpot_data['target'].values, random_state=42)
+#if save == 'y':
+    #predictions.to_csv('Predictions.csv')
 
-# Score on the training set was:0.8732657231806037
-exported_pipeline = make_pipeline(
-    RFE(estimator=ExtraTreesClassifier(criterion="entropy", max_features=0.4, n_estimators=100), step=0.45),
-    StackingEstimator(estimator=LogisticRegression(C=0.5, dual=False, penalty="l2")),
-    ExtraTreesClassifier(bootstrap=False, criterion="gini", max_features=0.3, min_samples_leaf=16, min_samples_split=16, n_estimators=100)
-)
-
-exported_pipeline.fit(training_features, training_target)
-results = exported_pipeline.predict(testing_features)
-#%%
-model_data = train.select_dtypes(include=[np.number])
-X_train, X_test, y_train, y_test = train_test_split(model_data.drop('WnvPresent', axis=1), model_data['WnvPresent'])
-
-xt = ExtraTreesClassifier(bootstrap=False, criterion="gini", max_features=0.3, min_samples_leaf=16, min_samples_split=16, n_estimators=100)
-xt.fit(X_train, y_train)
-
-print(metrics.roc_auc_score(y_test, xt.predict(X_test)))
-#%%
